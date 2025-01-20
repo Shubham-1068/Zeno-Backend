@@ -28,6 +28,7 @@ const io = new Server(server, {
 });
 
 let allusers = {};
+let allmessages = [];
 let MAX_USERS = 2;
 
 // handle socket connections
@@ -37,6 +38,7 @@ io.on("connection", (socket) => {
   );
 
   io.emit("allusers", allusers);
+  // io.emit("allmessages", allmessages);
 
   socket.on("join-user", (username) => {
     console.log(`${username} is attempting to join the socket connection.`);
@@ -57,11 +59,11 @@ io.on("connection", (socket) => {
 
     // Inform everyone that someone joined
     io.emit("joined", allusers);
-  });    
+  });
 
   socket.on("clearUsers", (e) => {
     allusers = {};
- 
+
     io.emit("allusers", allusers);
     console.log(allusers);
   });
@@ -97,7 +99,25 @@ io.on("connection", (socket) => {
     //broadcast to other peers
     socket.broadcast.emit("icecandidate", candidate);
   });
-});
+
+  // Send the current messages to the newly connected client
+  socket.emit("allmessages", allmessages);
+
+  // Handle incoming messages
+  socket.on("message", (data) => {
+    if (data && data.sender && data.content) {
+      allmessages.push(data); // Add the new message to the array
+      console.log("Updated Messages:", allmessages);
+
+      // Broadcast the updated array to all clients
+      io.emit("allmessages", allmessages);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    allmessages = [];
+  });
+}); 
 
 app.get("/", (req, res) => {
   res.send("Hello World!");
