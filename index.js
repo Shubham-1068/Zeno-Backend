@@ -114,6 +114,12 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("pv", (data) => {
+    if(data=="true"){
+      io.emit("pv", "true");
+    }
+  });
+
   socket.on("disconnect", () => {
     allmessages = [];
   });
