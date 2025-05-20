@@ -7,8 +7,8 @@ import cors from "cors";
 dotenv.config();
 
 const corsOptions = {
-  origin: "*", // Allow requests from any origin
-  credentials: true, // Allow credentials like cookies, authorization headers
+  origin: "*", 
+  credentials: true, 
 };
 
 const PORT = process.env.PORT || 5000;
@@ -29,87 +29,111 @@ const io = new Server(server, {
 
 let allusers = {};
 let allmessages = [];
-let MAX_USERS = 2;
+let roomCodes = {};
+const MAX_USERS_PER_ROOM = 2;
+const CODE_LENGTH = 6;
 
-// handle socket connections
+function generateRoomCode() {
+  const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let result = '';
+  for (let i = 0; i < CODE_LENGTH; i++) {
+    result += characters.charAt(Math.floor(Math.random() * characters.length));
+  }
+  return result;
+}
+
 io.on("connection", (socket) => {
-  console.log(
-    `Someone connected to socket server and socket id is ${socket.id}`
-  );
+  console.log(`Someone connected to socket server and socket id is ${socket.id}`);
 
   io.emit("allusers", allusers);
-  // io.emit("allmessages", allmessages);
 
-  socket.on("join-user", (username) => {
-    console.log(`${username} is attempting to join the socket connection.`);
-
-    if (Object.keys(allusers).length >= 2) {
-      console.log(`User limit reached. Disconnecting ${username}.`);
-      // Notify the user and disconnect them
-      socket.emit(
-        "user-limit-reached",
-        "User limit has been reached. You have been disconnected."
-      );
-      socket.disconnect(); // Disconnect the user from the socket
+  socket.on("create-room", (username, callback) => {
+    if (Object.keys(allusers).includes(username)) {
+      callback({ error: "Username already taken" });
       return;
     }
+    
+    const roomCode = generateRoomCode();
+    roomCodes[roomCode] = {
+      users: [username],
+      creator: username,
+      socketId: socket.id
+    };
+    
+    allusers[username] = { username, id: socket.id, roomCode };
+    callback({ roomCode });
+    io.emit("allusers", allusers);
+  });
 
-    allusers[username] = { username, id: socket.id };
-    console.log(`${username} successfully joined.`);
-
-    // Inform everyone that someone joined
-    io.emit("joined", allusers);
+  socket.on("join-room", (username, roomCode, callback) => {
+    roomCode = roomCode.toUpperCase();
+    
+    if (!roomCodes[roomCode]) {
+      callback({ error: "Invalid room code" });
+      return;
+    }
+    
+    if (roomCodes[roomCode].users.length >= MAX_USERS_PER_ROOM) {
+      callback({ error: "Room is full" });
+      return;
+    }
+    
+    if (Object.keys(allusers).includes(username)) {
+      callback({ error: "Username already taken" });
+      return;
+    }
+    
+    roomCodes[roomCode].users.push(username);
+    allusers[username] = { username, id: socket.id, roomCode };
+    
+    callback({ success: true, otherUser: roomCodes[roomCode].users[0] });
+    io.emit("allusers", allusers);
+    
+    io.to(roomCodes[roomCode].socketId).emit("user-joined", username);
   });
 
   socket.on("clearUsers", (e) => {
     allusers = {};
-
     io.emit("allusers", allusers);
     console.log(allusers);
   });
 
   socket.on("offer", ({ from, to, offer }) => {
     console.log({ from, to, offer });
-    io.to(allusers[to].id).emit("offer", { from, to, offer });
+    if (allusers[to] && allusers[from] && allusers[from].roomCode === allusers[to].roomCode) {
+      io.to(allusers[to].id).emit("offer", { from, to, offer });
+    }
   });
 
   socket.on("answer", ({ from, to, answer }) => {
-    io.to(allusers[from].id).emit("answer", { from, to, answer });
-  });
-
-  socket.on("end-call", ({ from, to }) => {
-    io.to(allusers[to].id).emit("end-call", { from, to });
+    if (allusers[to] && allusers[from] && allusers[from].roomCode === allusers[to].roomCode) {
+      io.to(allusers[from].id).emit("answer", { from, to, answer });
+    }
   });
 
   socket.on("call-ended", (caller) => {
     const [from, to] = caller;
-    io.to(allusers[from].id).emit("call-ended", caller);
-    io.to(allusers[to].id).emit("call-ended", caller);
+    if (allusers[from]) io.to(allusers[from].id).emit("call-ended", caller);
+    if (allusers[to]) io.to(allusers[to].id).emit("call-ended", caller);
 
-    // Remove user from object
+    if (allusers[from] && allusers[from].roomCode) {
+      const roomCode = allusers[from].roomCode;
+      delete roomCodes[roomCode];
+    }
+    
     allusers = {};
-
-    console.log(allusers); // Log the updated allusers object
-
     io.emit("allusers", allusers);
   });
 
   socket.on("icecandidate", (candidate) => {
     console.log({ candidate });
-    //broadcast to other peers
     socket.broadcast.emit("icecandidate", candidate);
   });
 
-  // Send the current messages to the newly connected client
-  socket.emit("allmessages", allmessages);
-
-  // Handle incoming messages
   socket.on("message", (data) => {
     if (data && data.sender && data.content) {
-      allmessages.push(data); // Add the new message to the array
+      allmessages.push(data);
       console.log("Updated Messages:", allmessages);
-
-      // Broadcast the updated array to all clients
       io.emit("allmessages", allmessages);
     }
   });
@@ -121,9 +145,29 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    const user = Object.values(allusers).find(u => u.id === socket.id);
+    if (user) {
+      delete allusers[user.username];
+      
+      if (user.roomCode && roomCodes[user.roomCode]) {
+        roomCodes[user.roomCode].users = roomCodes[user.roomCode].users.filter(u => u !== user.username);
+        
+        if (roomCodes[user.roomCode].users.length === 0) {
+          delete roomCodes[user.roomCode];
+        } else {
+          // Notify remaining user that peer disconnected
+          const remainingUser = roomCodes[user.roomCode].users[0];
+          if (allusers[remainingUser]) {
+            io.to(allusers[remainingUser].id).emit("peer-disconnected");
+          }
+        }
+      }
+    }
+    
+    io.emit("allusers", allusers);
     allmessages = [];
   });
-}); 
+});
 
 app.get("/", (req, res) => {
   res.send("Hello World!");
